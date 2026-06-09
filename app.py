@@ -254,12 +254,16 @@ with st.sidebar:
     st.markdown("*AI-powered M&E reporting for NGOs*")
     st.markdown("---")
     st.markdown("### ⚙️ API Settings")
-    api_key = st.text_input(
-        "Qwen API Key",
-        type="password",
-        placeholder="sk-...",
-        help="Get your key at: dashscope.aliyuncs.com"
-    )
+    api_key = st.secrets.get("QWEN_API_KEY", "")
+    if not api_key:
+        api_key = st.text_input(
+            "Qwen API Key",
+            type="password",
+            placeholder="sk-...",
+            help="Get your key at: dashscope.aliyuncs.com"
+        )
+    else:
+        st.success("✅ API Key loaded")
     model_choice = st.selectbox(
         "Model",
         ["qwen-plus", "qwen-turbo", "qwen-max"],
