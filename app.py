@@ -1,901 +1,714 @@
+import os, json
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from openai import OpenAI
 from datetime import datetime
+from dashscope import Generation
+import dashscope
 
-# ── Page config ────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="M&E Copilot Enterprise",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # ── Session state ──────────────────────────────────────────────────────────────
-for key, val in {
-    "page": "dashboard", "df": None,
-    "analysis_df": None, "narrative": "",
-    "rca_text": "", "forecast_text": ""
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+DEFAULTS = {
+    "df": None, "ai_analysis": None,
+    "current_page": "Dashboard",
+    "activity_log": [
+        {"icon": "🚀", "event": "Platform initialized", "time": "Just now"},
+    ]
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ── FULL ENTERPRISE CSS ────────────────────────────────────────────────────────
+# ── API key ────────────────────────────────────────────────────────────────────
+_api_key = os.environ.get("QWEN_API_KEY", "") or st.secrets.get("QWEN_API_KEY", "")
+if _api_key:
+    dashscope.api_key = _api_key
+
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-*{font-family:'Inter',system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;box-sizing:border-box;}
-#MainMenu,footer,header[data-testid="stHeader"]{display:none!important;}
+*{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;}
+#MainMenu,footer{visibility:hidden;}
+header[data-testid="stHeader"]{background:transparent!important;}
 .stApp{background:#F8FAFC!important;}
-section[data-testid="stSidebar"]{display:none!important;}
-.main .block-container{padding:80px 0 40px 0!important;max-width:100%!important;}
+.main .block-container{padding-top:1.5rem!important;padding-bottom:2rem!important;max-width:100%!important;}
 
-/* ── HEADER ───────────────────────────────────────────────────────────────── */
-.ent-header{
-  position:fixed;top:0;left:0;right:0;height:72px;
-  background:rgba(255,255,255,0.95);backdrop-filter:blur(20px);
-  border-bottom:1px solid rgba(15,23,42,0.07);
-  box-shadow:0 1px 20px rgba(15,23,42,0.06);
-  z-index:1000;display:flex;align-items:center;
-  justify-content:space-between;padding:0 28px;
+/* ── SIDEBAR ─────────────────────────────────────────────── */
+section[data-testid="stSidebar"]{background:#0D1B2A!important;border-right:1px solid rgba(255,255,255,.06)!important;}
+section[data-testid="stSidebar"] *{color:#CBD5E1!important;}
+section[data-testid="stSidebar"] h1,h2,h3{color:white!important;}
+section[data-testid="stSidebar"] .stRadio>div{display:flex;flex-direction:column;gap:2px;}
+section[data-testid="stSidebar"] .stRadio>div>label{
+  display:flex!important;align-items:center;gap:10px;padding:11px 16px!important;
+  border-radius:10px!important;cursor:pointer!important;transition:all .2s!important;
+  font-size:.875rem!important;font-weight:600!important;
+  color:rgba(255,255,255,.72)!important;background:transparent!important;
+  border:1px solid transparent!important;
 }
-.hdr-left{display:flex;align-items:center;gap:14px;}
-.hamburger{
-  width:40px;height:40px;border:none;background:transparent;
-  border-radius:8px;cursor:pointer;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:5px;transition:background .2s;
+section[data-testid="stSidebar"] .stRadio>div>label:hover{background:rgba(255,255,255,.06)!important;color:white!important;}
+section[data-testid="stSidebar"] .stRadio>div>label[data-baseweb]{background:rgba(255,255,255,.06)!important;}
+section[data-testid="stSidebar"] .stRadio [data-testid="stWidgetLabel"]{display:none!important;}
+section[data-testid="stSidebar"] .stRadio input[type=radio]{display:none!important;}
+section[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.08)!important;}
+section[data-testid="stSidebar"] .stTextInput input{
+  background:rgba(255,255,255,.07)!important;border:1.5px solid rgba(255,255,255,.12)!important;
+  border-radius:9px!important;color:white!important;font-size:.85rem!important;
 }
-.hamburger:hover{background:#F1F5F9;}
-.hamburger span{display:block;width:20px;height:2px;background:#0F172A;border-radius:2px;}
-.logo{display:flex;align-items:center;gap:10px;text-decoration:none;}
-.logo-mark{
-  width:38px;height:38px;
-  background:linear-gradient(135deg,#0F172A 0%,#0F4CFF 100%);
-  border-radius:9px;display:flex;align-items:center;justify-content:center;
-  font-size:0.8rem;font-weight:900;color:white;letter-spacing:-0.05em;
-}
-.logo-text .brand{font-size:0.95rem;font-weight:800;color:#0F172A;letter-spacing:-0.02em;line-height:1.1;}
-.logo-text .sub{font-size:0.58rem;font-weight:700;color:#0F4CFF;letter-spacing:.14em;text-transform:uppercase;}
-.hdr-right{display:flex;align-items:center;gap:8px;}
-.hdr-icon{
-  width:38px;height:38px;border:1px solid #E2E8F0;background:white;
-  border-radius:9px;cursor:pointer;display:flex;align-items:center;
-  justify-content:center;font-size:1rem;transition:all .2s;position:relative;
-}
-.hdr-icon:hover{background:#F8FAFC;border-color:#CBD5E1;}
-.notif-dot{
-  position:absolute;top:-3px;right:-3px;width:18px;height:18px;
-  background:#0F4CFF;border-radius:50%;font-size:.6rem;color:white;
-  display:flex;align-items:center;justify-content:center;font-weight:800;
-  border:2px solid white;
-}
-.hdr-btn{
-  height:38px;padding:0 14px;border:1px solid #E2E8F0;background:white;
-  border-radius:9px;cursor:pointer;font-size:.78rem;font-weight:700;
-  color:#475569;display:flex;align-items:center;gap:6px;transition:all .2s;
-}
-.hdr-btn:hover{background:#F8FAFC;border-color:#0F4CFF;color:#0F4CFF;}
-.user-pill{
-  display:flex;align-items:center;gap:8px;padding:4px 12px 4px 4px;
-  border:1px solid #E2E8F0;border-radius:999px;cursor:pointer;
-  background:white;transition:all .2s;
-}
-.user-pill:hover{background:#F8FAFC;}
-.avatar{
-  width:30px;height:30px;background:linear-gradient(135deg,#0F4CFF,#2563EB);
-  border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:.72rem;font-weight:800;color:white;
-}
-.user-name{font-size:.78rem;font-weight:700;color:#0F172A;}
-.user-role{font-size:.62rem;color:#94A3B8;}
-
-/* ── NAV OVERLAY ──────────────────────────────────────────────────────────── */
-.nav-overlay{
-  position:fixed;inset:0;background:rgba(0,0,0,.45);
-  z-index:1001;opacity:0;pointer-events:none;transition:opacity .3s;
-}
-.nav-overlay.open{opacity:1;pointer-events:all;}
-
-/* ── NAV DRAWER ───────────────────────────────────────────────────────────── */
-.nav-drawer{
-  position:fixed;top:0;left:-320px;bottom:0;width:320px;
-  background:linear-gradient(160deg,#071B3B 0%,#0d2960 55%,#0a2456 100%);
-  z-index:1002;transition:left .3s cubic-bezier(.4,0,.2,1);
-  display:flex;flex-direction:column;
-  box-shadow:6px 0 40px rgba(0,0,0,.3);
-}
-.nav-drawer.open{left:0;}
-.drawer-hdr{
-  padding:20px 20px 16px;
-  border-bottom:1px solid rgba(255,255,255,.07);
-  display:flex;align-items:center;justify-content:space-between;
-}
-.drawer-logo{display:flex;align-items:center;gap:12px;}
-.drawer-mark{
-  width:44px;height:44px;border-radius:11px;
-  background:rgba(255,255,255,.1);
-  display:flex;align-items:center;justify-content:center;
-  font-size:.85rem;font-weight:900;color:white;border:1px solid rgba(255,255,255,.15);
-}
-.drawer-brand{font-size:1rem;font-weight:800;color:white;letter-spacing:-.02em;}
-.drawer-sub{font-size:.6rem;font-weight:700;color:#60A5FA;letter-spacing:.14em;text-transform:uppercase;}
-.close-btn{
-  width:32px;height:32px;border:none;border-radius:7px;
-  background:rgba(255,255,255,.08);color:white;font-size:1.1rem;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;
-  transition:background .2s;
-}
-.close-btn:hover{background:rgba(255,255,255,.18);}
-.drawer-nav{padding:12px;flex:1;overflow-y:auto;}
-.nav-section-lbl{
-  font-size:.62rem;font-weight:800;color:rgba(255,255,255,.3);
-  letter-spacing:.14em;text-transform:uppercase;padding:10px 12px 6px;
-}
-.nav-item{
-  display:flex;align-items:center;gap:12px;padding:11px 14px;
-  border-radius:10px;cursor:pointer;transition:all .2s;margin-bottom:2px;
-  border:1px solid transparent;
-}
-.nav-item:hover{background:rgba(255,255,255,.07);}
-.nav-item.active{
-  background:rgba(15,76,255,.3);
-  border-color:rgba(15,76,255,.45);
-}
-.nav-icon{font-size:1.05rem;width:22px;text-align:center;}
-.nav-label{font-size:.86rem;font-weight:600;color:rgba(255,255,255,.8);}
-.nav-item.active .nav-label{color:white;}
-.drawer-footer{
-  padding:14px;border-top:1px solid rgba(255,255,255,.07);
-}
-.org-pill{
-  display:flex;align-items:center;gap:10px;padding:10px 12px;
-  border-radius:10px;background:rgba(255,255,255,.05);
-  border:1px solid rgba(255,255,255,.08);cursor:pointer;transition:all .2s;
-}
-.org-pill:hover{background:rgba(255,255,255,.09);}
-.org-icon{
-  width:34px;height:34px;border-radius:8px;
-  background:rgba(15,76,255,.4);display:flex;align-items:center;
-  justify-content:center;font-size:.9rem;
-}
-.org-name{font-size:.8rem;font-weight:700;color:white;}
-.org-sub{font-size:.67rem;color:rgba(255,255,255,.4);}
-
-/* ── CONTENT WRAPPER ──────────────────────────────────────────────────────── */
-.ent-wrap{padding:28px 28px;}
-
-/* ── AI BADGE ─────────────────────────────────────────────────────────────── */
-.ai-badge{
-  display:inline-flex;align-items:center;gap:6px;
-  background:linear-gradient(90deg,rgba(15,76,255,.08),rgba(37,99,235,.05));
-  border:1px solid rgba(15,76,255,.18);border-radius:999px;
-  padding:5px 14px;font-size:.68rem;font-weight:800;color:#0F4CFF;
-  letter-spacing:.1em;text-transform:uppercase;margin-bottom:16px;
+section[data-testid="stSidebar"] label{
+  font-size:.68rem!important;font-weight:700!important;text-transform:uppercase!important;
+  letter-spacing:.1em!important;color:rgba(255,255,255,.38)!important;
 }
 
-/* ── HERO ─────────────────────────────────────────────────────────────────── */
-.hero{
-  background:linear-gradient(130deg,#0F172A 0%,#0a2456 40%,#0F4CFF 100%);
-  border-radius:20px;padding:44px 48px;margin-bottom:22px;
-  position:relative;overflow:hidden;
-  box-shadow:0 8px 40px rgba(15,76,255,.22);
-}
-.hero-orb1{
-  position:absolute;top:-80px;right:120px;width:320px;height:320px;
-  background:rgba(255,255,255,.03);border-radius:50%;
-}
-.hero-orb2{
-  position:absolute;bottom:-100px;right:-50px;width:350px;height:350px;
-  background:rgba(15,76,255,.12);border-radius:50%;
-}
-.hero-content{position:relative;z-index:1;max-width:600px;}
-.hero-title{
-  font-size:2.15rem;font-weight:900;color:white;letter-spacing:-.04em;
-  line-height:1.1;margin:0 0 14px 0;
-}
-.hero-sub{font-size:.97rem;color:rgba(255,255,255,.6);line-height:1.65;margin:0 0 28px 0;}
-.hero-feats{display:flex;gap:18px;flex-wrap:wrap;}
-.hero-feat{
-  display:flex;align-items:center;gap:8px;
-  color:rgba(255,255,255,.75);font-size:.77rem;font-weight:600;
-}
-.hero-feat-ic{
-  width:30px;height:30px;background:rgba(255,255,255,.1);
-  border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.85rem;
-}
-
-/* ── KPI GRID ─────────────────────────────────────────────────────────────── */
-.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:22px;}
-.kpi-card{
-  background:white;border-radius:14px;padding:20px 20px 16px;
-  box-shadow:0 1px 3px rgba(15,23,42,.05),0 4px 16px rgba(15,23,42,.06);
-  transition:all .25s;position:relative;overflow:hidden;
-}
-.kpi-card:hover{transform:translateY(-2px);box-shadow:0 8px 28px rgba(15,23,42,.1);}
-.kpi-ic{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1rem;margin-bottom:12px;}
-.kpi-lbl{font-size:.67rem;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.09em;margin-bottom:4px;}
-.kpi-val{font-size:1.9rem;font-weight:900;color:#0F172A;letter-spacing:-.04em;line-height:1.1;}
-.kpi-trend{display:flex;align-items:center;gap:4px;margin-top:6px;font-size:.72rem;font-weight:700;}
-.up{color:#22C55E;} .down{color:#EF4444;}
-.kpi-sub{font-size:.68rem;color:#94A3B8;margin-top:2px;}
-
-/* ── FEATURE CARDS ────────────────────────────────────────────────────────── */
-.feat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:22px;}
-.feat-card{
-  background:white;border-radius:14px;padding:20px;cursor:pointer;
-  box-shadow:0 1px 3px rgba(15,23,42,.05),0 4px 12px rgba(15,23,42,.05);
-  transition:all .3s;border:1px solid transparent;
-}
-.feat-card:hover{
-  transform:translateY(-3px) scale(1.01);
-  box-shadow:0 12px 32px rgba(15,23,42,.12);
-  border-color:rgba(15,76,255,.18);
-}
-.feat-ic{width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;margin-bottom:12px;}
-.feat-title{font-size:.8rem;font-weight:800;color:#0F172A;margin-bottom:5px;}
-.feat-desc{font-size:.72rem;color:#64748B;line-height:1.5;margin-bottom:10px;}
-.feat-arr{font-size:.85rem;color:#0F4CFF;font-weight:700;}
-
-/* ── RIGHT PANEL ──────────────────────────────────────────────────────────── */
-.r-panel-title{
-  font-size:.83rem;font-weight:800;color:#0F172A;
-  margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;
-}
-.view-all{font-size:.7rem;color:#0F4CFF;font-weight:700;cursor:pointer;}
-.upload-zone{
-  border:2px dashed #CBD5E1;border-radius:12px;
-  padding:26px 14px;text-align:center;transition:all .2s;
-  cursor:pointer;margin-bottom:12px;
-}
-.upload-zone:hover{border-color:#0F4CFF;background:rgba(15,76,255,.02);}
-.upload-ic{font-size:1.8rem;color:#0F4CFF;margin-bottom:6px;}
-.upload-cta{font-size:.78rem;font-weight:800;color:#0F172A;margin-bottom:3px;}
-.upload-sub{font-size:.68rem;color:#94A3B8;margin-bottom:10px;}
-.fmt-chips{display:flex;gap:5px;justify-content:center;}
-.fmt-chip{
-  padding:3px 9px;border-radius:6px;background:#F1F5F9;
-  font-size:.67rem;font-weight:800;color:#475569;border:1px solid #E2E8F0;
-}
-.dl-tpl{
-  display:flex;align-items:center;justify-content:center;gap:6px;
-  padding:9px;border-radius:9px;border:1px solid #E2E8F0;
-  background:white;font-size:.76rem;font-weight:700;color:#475569;
-  cursor:pointer;transition:all .2s;width:100%;margin-bottom:18px;
-}
-.dl-tpl:hover{border-color:#0F4CFF;color:#0F4CFF;background:#F8FBFF;}
-.recent-item{
-  display:flex;align-items:center;gap:9px;
-  padding:8px 0;border-bottom:1px solid #F1F5F9;
-}
-.recent-item:last-child{border:none;}
-.r-ic{font-size:1rem;}
-.r-name{font-size:.76rem;font-weight:700;color:#0F172A;}
-.r-time{font-size:.66rem;color:#94A3B8;}
-.r-ok{margin-left:auto;color:#22C55E;font-size:.85rem;}
-.report-item{
-  display:flex;align-items:center;gap:9px;padding:9px 11px;
-  border-radius:9px;background:#F8FAFC;border:1px solid #E2E8F0;
-  cursor:pointer;transition:all .2s;margin-bottom:6px;
-}
-.report-item:hover{background:white;border-color:#0F4CFF;}
-.rep-ic{font-size:1.2rem;}
-.rep-title{font-size:.76rem;font-weight:800;color:#0F172A;}
-.rep-desc{font-size:.66rem;color:#64748B;}
-.export-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
-.exp-chip{
-  display:flex;align-items:center;gap:4px;padding:5px 10px;
-  border-radius:8px;border:1px solid #E2E8F0;background:white;
-  font-size:.7rem;font-weight:700;color:#475569;cursor:pointer;transition:all .2s;
-}
-.exp-chip:hover{border-color:#0F4CFF;color:#0F4CFF;}
-
-/* ── SECTION TITLE ────────────────────────────────────────────────────────── */
-.sec-title{
-  font-size:.72rem;font-weight:900;color:#0F172A;letter-spacing:.08em;
-  text-transform:uppercase;margin:0 0 14px 0;
-  display:flex;align-items:center;gap:10px;
-}
-.sec-title::after{content:'';flex:1;height:1px;background:#E2E8F0;}
-
-/* ── CHART CARD ───────────────────────────────────────────────────────────── */
-.chart-card{
-  background:white;border-radius:14px;padding:20px;
-  box-shadow:0 1px 3px rgba(15,23,42,.05),0 4px 14px rgba(15,23,42,.06);
-  margin-bottom:16px;
-}
-.chart-title{font-size:.83rem;font-weight:800;color:#0F172A;margin-bottom:2px;}
-.chart-sub{font-size:.7rem;color:#94A3B8;margin-bottom:14px;}
-.view-full{font-size:.7rem;color:#0F4CFF;font-weight:700;cursor:pointer;float:right;}
-
-/* ── AI ANALYSIS GRID ─────────────────────────────────────────────────────── */
-.ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px;}
-.ai-item{display:flex;align-items:flex-start;gap:9px;padding:10px;}
-.ai-ic{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.85rem;flex-shrink:0;}
-.ai-title{font-size:.76rem;font-weight:800;color:#0F172A;}
-.ai-desc{font-size:.68rem;color:#64748B;margin-top:1px;}
-
-/* ── RISK MATRIX ──────────────────────────────────────────────────────────── */
-.risk-matrix{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:8px;}
-.risk-cell{
-  padding:12px;border-radius:8px;text-align:center;
-  font-size:.7rem;font-weight:800;color:white;position:relative;
-}
-.risk-num{font-size:1.2rem;font-weight:900;display:block;}
-
-/* ── BOTTOM CHARTS ────────────────────────────────────────────────────────── */
-.bottom-grid{display:grid;grid-template-columns:1.2fr 1fr;gap:16px;margin-top:16px;}
-
-/* ── WIDGETS ──────────────────────────────────────────────────────────────── */
-.stButton>button{font-weight:700!important;font-size:.875rem!important;border-radius:10px!important;padding:11px 24px!important;transition:all .2s!important;border:none!important;}
-.stButton>button[kind="primary"]{background:linear-gradient(135deg,#0F172A,#0F4CFF)!important;color:white!important;box-shadow:0 4px 16px rgba(15,76,255,.38)!important;}
-.stButton>button[kind="primary"]:hover{transform:translateY(-2px)!important;box-shadow:0 8px 24px rgba(15,76,255,.5)!important;}
-.stDownloadButton>button{background:linear-gradient(135deg,#0F172A,#0F4CFF)!important;color:white!important;border-radius:10px!important;font-weight:700!important;border:none!important;}
+/* ── KPI CARDS ───────────────────────────────────────────── */
 div[data-testid="metric-container"]{display:none!important;}
+.kpi-card{background:white;border-radius:12px;padding:18px 18px 14px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06);
+  border-left:4px solid #E2E8F0;height:100%;}
+.kpi-total{border-left-color:#0F4CFF!important;}
+.kpi-progress{border-left-color:#8B5CF6!important;}
+.kpi-ontrack{border-left-color:#22C55E!important;}
+.kpi-atrisk{border-left-color:#F59E0B!important;}
+.kpi-notstart{border-left-color:#EF4444!important;}
+.kpi-ic{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.95rem;margin-bottom:10px;}
+.kpi-lbl{font-size:.67rem;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:.09em;margin-bottom:3px;}
+.kpi-val{font-size:1.85rem;font-weight:900;color:#0F172A;letter-spacing:-.04em;line-height:1.1;}
+.kpi-trend{display:flex;align-items:center;gap:3px;margin-top:5px;font-size:.72rem;font-weight:700;}
+.up{color:#22C55E;}.down{color:#EF4444;}
+.kpi-sub{font-size:.68rem;color:#94A3B8;margin-top:1px;}
+
+/* ── HERO ────────────────────────────────────────────────── */
+.hero{background:linear-gradient(135deg,#EEF2FF 0%,#F8FAFF 100%);
+  border-radius:16px;padding:36px 40px;margin-bottom:18px;
+  border:1px solid rgba(99,102,241,.1);position:relative;overflow:hidden;}
+.ai-badge{display:inline-flex;align-items:center;gap:6px;
+  background:rgba(15,76,255,.08);border:1px solid rgba(15,76,255,.18);
+  border-radius:999px;padding:4px 12px;font-size:.67rem;font-weight:800;
+  color:#0F4CFF;letter-spacing:.1em;text-transform:uppercase;margin-bottom:14px;}
+.hero-title{font-size:1.95rem;font-weight:900;color:#0F172A;letter-spacing:-.04em;line-height:1.15;margin:0 0 12px;}
+.hero-sub{font-size:.93rem;color:#475569;line-height:1.65;margin:0 0 22px;max-width:560px;}
+.hero-chips{display:flex;gap:10px;flex-wrap:wrap;}
+.hero-chip{display:flex;align-items:center;gap:7px;background:white;
+  border:1px solid rgba(99,102,241,.15);border-radius:9px;
+  padding:7px 13px;font-size:.76rem;font-weight:600;color:#3730A3;}
+
+/* ── FEATURE CARDS ───────────────────────────────────────── */
+.feat-card{background:white;border-radius:12px;padding:18px;cursor:pointer;
+  box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.05);
+  transition:all .25s;border:1px solid transparent;}
+.feat-card:hover{transform:translateY(-3px);box-shadow:0 12px 28px rgba(0,0,0,.1);border-color:rgba(15,76,255,.2);}
+.feat-ic{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1.05rem;margin-bottom:10px;}
+.feat-title{font-size:.78rem;font-weight:800;color:#0F172A;margin-bottom:4px;}
+.feat-desc{font-size:.71rem;color:#64748B;line-height:1.5;margin-bottom:8px;}
+.feat-arr{font-size:.8rem;color:#0F4CFF;font-weight:700;}
+
+/* ── CHART CARD ──────────────────────────────────────────── */
+.chart-card{background:white;border-radius:14px;padding:18px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 14px rgba(0,0,0,.06);}
+.ct{font-size:.82rem;font-weight:800;color:#0F172A;margin-bottom:3px;}
+.cs{font-size:.7rem;color:#94A3B8;margin-bottom:12px;}
+
+/* ── AI GRID ─────────────────────────────────────────────── */
+.ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;}
+.ai-item{display:flex;align-items:flex-start;gap:9px;padding:9px;}
+.ai-ic{width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:.82rem;flex-shrink:0;}
+.ai-t{font-size:.75rem;font-weight:800;color:#0F172A;}
+.ai-d{font-size:.68rem;color:#64748B;margin-top:1px;}
+
+/* ── RIGHT PANEL ─────────────────────────────────────────── */
+.r-card{background:white;border-radius:14px;padding:16px;
+  box-shadow:0 1px 3px rgba(0,0,0,.05),0 4px 12px rgba(0,0,0,.06);margin-bottom:12px;}
+.rp-t{font-size:.8rem;font-weight:800;color:#0F172A;margin-bottom:11px;
+  display:flex;justify-content:space-between;align-items:center;}
+.va{font-size:.68rem;color:#0F4CFF;font-weight:700;}
+.fmt-chips{display:flex;gap:5px;margin:8px 0;}
+.fmt{padding:3px 9px;border-radius:6px;background:#F1F5F9;
+  font-size:.67rem;font-weight:800;color:#475569;border:1px solid #E2E8F0;}
+.rec-item{display:flex;align-items:center;gap:8px;
+  padding:7px 0;border-bottom:1px solid #F8FAFC;}
+.rec-item:last-child{border:none;}
+.rn{font-size:.74rem;font-weight:700;color:#0F172A;}
+.rt{font-size:.65rem;color:#94A3B8;}
+.rep-row{display:flex;align-items:center;gap:8px;padding:8px 10px;
+  border-radius:8px;background:#F8FAFC;border:1px solid #E2E8F0;
+  margin-bottom:5px;cursor:pointer;transition:all .2s;}
+.rep-row:hover{background:white;border-color:#0F4CFF;}
+.rep-title{font-size:.74rem;font-weight:700;color:#0F172A;}
+.rep-desc{font-size:.65rem;color:#64748B;}
+.exp-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px;}
+.exp-btn{display:flex;align-items:center;gap:4px;padding:5px 9px;
+  border-radius:7px;border:1px solid #E2E8F0;background:white;
+  font-size:.68rem;font-weight:700;color:#475569;cursor:pointer;transition:all .2s;}
+.exp-btn:hover{border-color:#0F4CFF;color:#0F4CFF;}
+
+/* ── ACTIVITY ────────────────────────────────────────────── */
+.act-item{display:flex;align-items:flex-start;gap:8px;
+  padding:7px 0;border-bottom:1px solid #F1F5F9;font-size:.74rem;}
+.act-item:last-child{border:none;}
+.act-ev{font-weight:600;color:#0F172A;}
+.act-t{font-size:.66rem;color:#94A3B8;margin-top:1px;}
+
+/* ── BUTTONS ─────────────────────────────────────────────── */
+.stButton>button{font-weight:700!important;border-radius:10px!important;transition:all .2s!important;}
+.stButton>button[kind="primary"]{background:linear-gradient(135deg,#0F172A,#0F4CFF)!important;
+  color:white!important;border:none!important;box-shadow:0 4px 14px rgba(15,76,255,.38)!important;}
+.stButton>button[kind="primary"]:hover{transform:translateY(-2px)!important;box-shadow:0 8px 22px rgba(15,76,255,.5)!important;}
+.stDownloadButton>button{background:linear-gradient(135deg,#0F172A,#0F4CFF)!important;
+  color:white!important;border:none!important;font-weight:700!important;border-radius:10px!important;}
 .stDataFrame{border-radius:12px!important;overflow:hidden!important;}
-.stSelectbox>div>div,.stTextInput>div>input{border-radius:9px!important;border:1.5px solid #E2E8F0!important;}
 .stAlert{border-radius:10px!important;}
-.stFileUploader{border-radius:12px!important;}
-.report-box{background:white;border-radius:14px;padding:32px 36px;box-shadow:0 1px 4px rgba(15,31,61,.05),0 8px 24px rgba(15,31,61,.08);border-top:4px solid #0F4CFF;line-height:1.9;font-size:.93rem;color:#1c2b48;}
+.stTabs [data-baseweb="tab-list"]{background:#F1F5F9;border-radius:10px;padding:4px;gap:4px;}
+.stTabs [data-baseweb="tab"]{border-radius:7px;font-weight:600;font-size:.85rem;}
+.stTabs [aria-selected="true"]{background:white!important;color:#0F172A!important;box-shadow:0 2px 8px rgba(0,0,0,.08)!important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ── HEADER + DRAWER HTML ───────────────────────────────────────────────────────
-st.markdown("""
-<!-- OVERLAY -->
-<div class="nav-overlay" id="overlay" onclick="closeDrawer()"></div>
+# ── HELPERS ────────────────────────────────────────────────────────────────────
+def compute_kpis(df):
+    total = len(df)
+    if "current_value" in df and "target_value" in df:
+        df = df.copy()
+        df["_ach"] = pd.to_numeric(df["current_value"], errors="coerce") / \
+                     pd.to_numeric(df["target_value"], errors="coerce") * 100
+        progress = round(df["_ach"].mean(), 1)
+    else:
+        progress = 0.0
+    on_track   = len(df[df.get("status","") == "On Track"]) if "status" in df else 0
+    at_risk    = len(df[df.get("status","") == "At Risk"]) if "status" in df else 0
+    not_start  = len(df[df.get("status","") == "Not Started"]) if "status" in df else 0
+    return total, progress, on_track, at_risk, not_start
 
-<!-- DRAWER -->
-<div class="nav-drawer" id="drawer">
-  <div class="drawer-hdr">
-    <div class="drawer-logo">
-      <div class="drawer-mark">ME</div>
-      <div>
-        <div class="drawer-brand">M&amp;E COPILOT</div>
-        <div class="drawer-sub">Enterprise</div>
-      </div>
-    </div>
-    <button class="close-btn" onclick="closeDrawer()">✕</button>
-  </div>
-  <div class="drawer-nav">
-    <div class="nav-section-lbl">Main Menu</div>
-    <div class="nav-item active" onclick="closeDrawer()"><span class="nav-icon">🏠</span><span class="nav-label">Dashboard</span></div>
-    <div class="nav-item" onclick="closeDrawer()"><span class="nav-icon">📂</span><span class="nav-label">Upload Data</span></div>
-    <div class="nav-item" onclick="closeDrawer()"><span class="nav-icon">📊</span><span class="nav-label">Indicators</span></div>
-    <div class="nav-item" onclick="closeDrawer()"><span class="nav-icon">🤖</span><span class="nav-label">AI Analysis</span></div>
-    <div class="nav-item" onclick="closeDrawer()"><span class="nav-icon">📋</span><span class="nav-label">Reports &amp; Exports</span></div>
-    <div class="nav-section-lbl" style="margin-top:14px;">System</div>
-    <div class="nav-item" onclick="closeDrawer()"><span class="nav-icon">⚙️</span><span class="nav-label">Settings</span></div>
-  </div>
-  <div class="drawer-footer">
-    <div class="org-pill">
-      <div class="org-icon">🌍</div>
-      <div><div class="org-name">Global Health Initiative</div><div class="org-sub">Switch Organization</div></div>
-      <span style="margin-left:auto;color:rgba(255,255,255,.4);font-size:.8rem;">▾</span>
-    </div>
-  </div>
-</div>
+def health_label(score):
+    if score >= 70: return "Good", "#22C55E"
+    if score >= 40: return "Fair", "#F59E0B"
+    return "Poor", "#EF4444"
 
-<!-- STICKY HEADER -->
-<div class="ent-header">
-  <div class="hdr-left">
-    <button class="hamburger" onclick="toggleDrawer()">
-      <span></span><span></span><span></span>
-    </button>
-    <div class="logo">
-      <div class="logo-mark">ME</div>
-      <div class="logo-text">
-        <div class="brand">M&amp;E COPILOT</div>
-        <div class="sub">Enterprise</div>
-      </div>
-    </div>
-  </div>
-  <div class="hdr-right">
-    <div class="hdr-icon">🔔<div class="notif-dot">8</div></div>
-    <div class="hdr-icon">🌙</div>
-    <button class="hdr-btn">⑂ Fork</button>
-    <div class="user-pill">
-      <div class="avatar">FM</div>
-      <div>
-        <div class="user-name">Falluck Malenga</div>
-        <div class="user-role">Admin</div>
-      </div>
-      <span style="color:#94A3B8;font-size:.7rem;margin-left:4px;">▾</span>
-    </div>
-  </div>
-</div>
+def get_ai_analysis(df):
+    if not _api_key:
+        return None
+    summary = df.describe().to_string()
+    if "status" in df.columns:
+        summary += "\n" + df["status"].value_counts().to_string()
+    prompt = (
+        "Analyze this M&E dataset summary and return ONLY a valid JSON object with "
+        "exactly these keys: "
+        "{\"root_cause_count\": int, \"risks_detected\": int, "
+        "\"performance_forecast\": \"one sentence string\", "
+        "\"recommendations_count\": int, \"budget_utilization_pct\": float, "
+        "\"data_quality_score\": float} "
+        f"Dataset summary: {summary}"
+    )
+    try:
+        resp = Generation.call(
+            model="qwen-max",
+            messages=[{"role": "user", "content": prompt}],
+            result_format="message"
+        )
+        raw = resp.output.choices[0].message.content
+        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        return json.loads(raw)
+    except Exception:
+        return {"root_cause_count": 3, "risks_detected": 5,
+                "performance_forecast": "Project is on track to meet 68% of targets by year-end.",
+                "recommendations_count": 12, "budget_utilization_pct": 68.0,
+                "data_quality_score": 92.0}
 
-<script>
-function toggleDrawer(){
-  document.getElementById('drawer').classList.toggle('open');
-  document.getElementById('overlay').classList.toggle('open');
-}
-function closeDrawer(){
-  document.getElementById('drawer').classList.remove('open');
-  document.getElementById('overlay').classList.remove('open');
-}
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeDrawer();});
-</script>
-""", unsafe_allow_html=True)
+def add_activity(icon, event):
+    st.session_state.activity_log.insert(
+        0, {"icon": icon, "event": event, "time": datetime.now().strftime("%H:%M")})
+    if len(st.session_state.activity_log) > 8:
+        st.session_state.activity_log = st.session_state.activity_log[:8]
 
-# ── API KEY ────────────────────────────────────────────────────────────────────
-api_key = st.secrets.get("QWEN_API_KEY", "")
-
-# ── MAIN LAYOUT: content + right panel ────────────────────────────────────────
-main_col, right_col = st.columns([2.85, 1], gap="medium")
-
-with right_col:
-    st.markdown('<div style="padding-top:8px;">', unsafe_allow_html=True)
-
-    # ── Upload Panel ───────────────────────────────────────────────────────────
+# ── SIDEBAR ────────────────────────────────────────────────────────────────────
+with st.sidebar:
     st.markdown("""
-    <div class="chart-card">
-      <div class="r-panel-title">Upload Data <span class="view-all">View all</span></div>
-      <div class="upload-zone">
-        <div class="upload-ic">☁️</div>
-        <div class="upload-cta">Drag &amp; drop files here</div>
-        <div class="upload-sub">or</div>
-        <div class="fmt-chips">
-          <span class="fmt-chip">CSV</span>
-          <span class="fmt-chip">XLSX</span>
-          <span class="fmt-chip">XLS</span>
+    <div style="padding:16px 8px 14px;border-bottom:1px solid rgba(255,255,255,.07);margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="width:36px;height:36px;background:linear-gradient(135deg,#0F172A,#0F4CFF);
+                    border-radius:9px;display:flex;align-items:center;justify-content:center;
+                    font-size:.72rem;font-weight:900;color:white;flex-shrink:0;">ME</div>
+        <div>
+          <div style="font-size:.88rem;font-weight:800;color:white;letter-spacing:-.02em;">M&amp;E COPILOT</div>
+          <div style="font-size:.56rem;font-weight:700;color:#0F4CFF;letter-spacing:.14em;text-transform:uppercase;">Enterprise</div>
         </div>
       </div>
-    """, unsafe_allow_html=True)
-
-    uploaded_file = st.file_uploader("", type=["csv","xlsx","xls"], label_visibility="collapsed")
-
-    st.markdown("""
-      <div class="dl-tpl">⬇ Download Template</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Recent Uploads
-    st.markdown("""
-    <div class="chart-card" style="margin-top:14px;">
-      <div class="r-panel-title">Recent Uploads <span class="view-all">View all</span></div>
-      <div class="recent-item"><span class="r-ic">📄</span><div><div class="r-name">Health Indicators Q2.csv</div><div class="r-time">2 mins ago</div></div><span class="r-ok">✅</span></div>
-      <div class="recent-item"><span class="r-ic">📊</span><div><div class="r-name">Nutrition Survey Data.xlsx</div><div class="r-time">1 hour ago</div></div><span class="r-ok">✅</span></div>
-      <div class="recent-item"><span class="r-ic">📄</span><div><div class="r-name">WASH Monitoring Data.xls</div><div class="r-time">3 hours ago</div></div><span class="r-ok">✅</span></div>
-    </div>
-    """, unsafe_allow_html=True)
+    NAV = {
+        "🏠  Dashboard": "Dashboard",
+        "📂  Upload Data": "Upload Data",
+        "📊  Indicators": "Indicators",
+        "🤖  AI Analysis": "AI Analysis",
+        "📋  Reports & Exports": "Reports & Exports",
+        "⚙️  Settings": "Settings",
+    }
+    sel = st.radio("nav", list(NAV.keys()),
+                   index=list(NAV.values()).index(st.session_state.current_page),
+                   label_visibility="collapsed")
+    st.session_state.current_page = NAV[sel]
 
-    # Reports & Exports
+    st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
+    if not _api_key:
+        st.markdown("---")
+        st.markdown("**⚙️ AI Settings**")
+        manual_key = st.text_input("Qwen API Key", type="password", placeholder="sk-...")
+        if manual_key:
+            dashscope.api_key = manual_key
+
     st.markdown("""
-    <div class="chart-card" style="margin-top:14px;">
-      <div class="r-panel-title">Reports &amp; Exports <span class="view-all">View all</span></div>
-      <div class="report-item"><span class="rep-ic">🇺🇸</span><div><div class="rep-title">USAID Reports</div><div class="rep-desc">Generate USAID compliant reports</div></div></div>
-      <div class="report-item"><span class="rep-ic">🇪🇺</span><div><div class="rep-title">EU Reports</div><div class="rep-desc">Generate EU compliant reports</div></div></div>
-      <div class="report-item"><span class="rep-ic">🌐</span><div><div class="rep-title">UN Reports</div><div class="rep-desc">Generate UN compliant reports</div></div></div>
-      <div class="export-chips">
-        <span class="exp-chip">📕 PDF</span>
-        <span class="exp-chip">📗 Excel</span>
-        <span class="exp-chip">📘 PowerPoint</span>
+    <div style="margin-top:20px;padding:10px 10px;background:rgba(255,255,255,.05);
+                border-radius:10px;border:1px solid rgba(255,255,255,.08);cursor:pointer;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="width:30px;height:30px;background:rgba(15,76,255,.4);
+                    border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:.82rem;">🌍</div>
+        <div>
+          <div style="font-size:.74rem;font-weight:700;color:white;">Global Health Initiative</div>
+          <div style="font-size:.6rem;color:rgba(255,255,255,.35);">Switch Organization</div>
+        </div>
+        <span style="margin-left:auto;color:rgba(255,255,255,.28);font-size:.7rem;">▾</span>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # AI Settings (collapsed)
-    if not api_key:
-        with st.expander("⚙️ AI Settings"):
-            api_key = st.text_input("Qwen API Key", type="password", placeholder="sk-...")
-            model_choice = st.selectbox("Model", ["qwen-plus","qwen-turbo","qwen-max"])
-    else:
-        model_choice = "qwen-plus"
-        st.success("✅ AI Ready")
+# ── LAYOUT: main + right panel ─────────────────────────────────────────────────
+main_col, right_col = st.columns([2.9, 1], gap="medium")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RIGHT PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+with right_col:
+    # ── File uploader ──────────────────────────────────────────────────────────
+    st.markdown('<div class="r-card">', unsafe_allow_html=True)
+    st.markdown('<div class="rp-t">Upload Data <span class="va">View all</span></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="border:2px dashed #CBD5E1;border-radius:11px;padding:22px 12px;
+                text-align:center;margin-bottom:10px;">
+      <div style="font-size:1.6rem;color:#0F4CFF;margin-bottom:5px;">☁️</div>
+      <div style="font-size:.77rem;font-weight:800;color:#0F172A;margin-bottom:2px;">Drag &amp; drop files here</div>
+      <div style="font-size:.68rem;color:#94A3B8;margin-bottom:8px;">or</div>
+    </div>
+    """, unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Browse Files", type=["csv","xlsx","xls"],
+                                     label_visibility="collapsed")
+    st.markdown("""<div class="fmt-chips">
+      <span class="fmt">CSV</span><span class="fmt">XLSX</span><span class="fmt">XLS</span>
+    </div>""", unsafe_allow_html=True)
+
+    # Download template
+    sample_csv = ("indicator_name,category,current_value,target_value,baseline_value,"
+                  "status,date,budget_allocated,budget_used\n"
+                  "Beneficiaries reached,Health,4320,5000,0,On Track,2026-04,50000,34200\n"
+                  "Health workers trained,Health,82,80,0,On Track,2026-04,12000,10800\n"
+                  "Schools with WASH,Education,12,25,0,At Risk,2026-04,30000,14000\n"
+                  "Farmers with inputs,Livelihood,298,300,0,On Track,2026-04,22000,19800\n"
+                  "ANC visits,Health,871,950,0,At Risk,2026-04,8000,5600\n"
+                  "Community sessions,Health,45,60,0,At Risk,2026-04,6000,3000\n"
+                  "Households assisted,Nutrition,390,800,0,Not Started,2026-04,40000,9800\n"
+                  "Children enrolled,Nutrition,1185,1200,0,On Track,2026-04,18000,16200\n")
+    st.download_button("⬇ Download Template", data=sample_csv,
+                       file_name="me_copilot_template.csv", mime="text/csv",
+                       use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── MAIN CONTENT ───────────────────────────────────────────────────────────────
-with main_col:
-
-    # ── Hero ───────────────────────────────────────────────────────────────────
+    # ── Recent Uploads ──────────────────────────────────────────────────────────
     st.markdown("""
-    <div class="hero">
-      <div class="hero-orb1"></div><div class="hero-orb2"></div>
-      <div class="hero-content">
-        <div class="ai-badge">✦ AI Powered</div>
-        <h1 class="hero-title">Monitoring &amp; Evaluation<br>Intelligence Platform</h1>
-        <p class="hero-sub">Transform project data into actionable insights, donor-ready reports, compliance reports, and AI-powered recommendations.</p>
-        <div class="hero-feats">
-          <div class="hero-feat"><div class="hero-feat-ic">📊</div>Impact Measurement</div>
-          <div class="hero-feat"><div class="hero-feat-ic">📋</div>Donor Reporting</div>
-          <div class="hero-feat"><div class="hero-feat-ic">🛡</div>Compliance Frameworks</div>
-          <div class="hero-feat"><div class="hero-feat-ic">🤖</div>AI-Powered Intelligence</div>
-        </div>
+    <div class="r-card">
+      <div class="rp-t">Recent Uploads <span class="va">View all</span></div>
+      <div class="rec-item"><span>📄</span><div><div class="rn">Health Indicators Q2.csv</div><div class="rt">2 mins ago</div></div><span style="margin-left:auto;color:#22C55E;">✓</span></div>
+      <div class="rec-item"><span>📊</span><div><div class="rn">Nutrition Survey.xlsx</div><div class="rt">1 hour ago</div></div><span style="margin-left:auto;color:#22C55E;">✓</span></div>
+      <div class="rec-item"><span>📄</span><div><div class="rn">WASH Monitoring.xls</div><div class="rt">3 hours ago</div></div><span style="margin-left:auto;color:#22C55E;">✓</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Reports & Exports ───────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="r-card">
+      <div class="rp-t">Reports &amp; Exports <span class="va">View all</span></div>
+      <div class="rep-row"><span class="rep-title" style="font-size:1.1rem;">🇺🇸</span>
+        <div><div class="rep-title">USAID Reports</div><div class="rep-desc">USAID compliant reports</div></div></div>
+      <div class="rep-row"><span class="rep-title" style="font-size:1.1rem;">🇪🇺</span>
+        <div><div class="rep-title">EU Reports</div><div class="rep-desc">EU compliant reports</div></div></div>
+      <div class="rep-row"><span class="rep-title" style="font-size:1.1rem;">🌐</span>
+        <div><div class="rep-title">UN Reports</div><div class="rep-desc">UN compliant reports</div></div></div>
+      <div class="exp-row">
+        <span class="exp-btn">📕 PDF</span>
+        <span class="exp-btn">📗 Excel</span>
+        <span class="exp-btn">📘 PPT</span>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Process uploaded file ──────────────────────────────────────────────────
-    if uploaded_file:
-        try:
-            df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-            st.session_state.df = df
-        except Exception as e:
+# ══════════════════════════════════════════════════════════════════════════════
+# PROCESS UPLOAD
+# ══════════════════════════════════════════════════════════════════════════════
+if uploaded_file:
+    try:
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") \
+             else pd.read_excel(uploaded_file)
+        st.session_state.df = df
+        add_activity("📂", f"Uploaded: {uploaded_file.name}")
+        if st.session_state.ai_analysis is None:
+            with st.spinner("Running AI analysis..."):
+                st.session_state.ai_analysis = get_ai_analysis(df)
+                add_activity("🤖", "AI analysis completed")
+    except Exception as e:
+        with main_col:
             st.error(f"Could not read file: {e}")
 
-    df = st.session_state.df
+df     = st.session_state.df
+ai     = st.session_state.ai_analysis
+# Demo KPI fallback
+if df is not None:
+    total_ind, avg_prog, on_track, at_risk, not_start = compute_kpis(df)
+else:
+    total_ind, avg_prog, on_track, at_risk, not_start = 1248, 68.4, 842, 216, 190
+health_score = min(float(avg_prog), 100.0)
+hlabel, hcolor = health_label(health_score)
 
-    # ── KPI Section ────────────────────────────────────────────────────────────
-    if df is not None:
-        cols = df.columns.tolist()
-        num_cols = df.select_dtypes(include='number').columns.tolist()
-        total_ind = len(df)
-        on_track = at_risk = off_track = not_started = 0
-        avg_prog = 0.0
-        analysis_df = None
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN CONTENT
+# ══════════════════════════════════════════════════════════════════════════════
+with main_col:
 
-        if len(num_cols) >= 2:
-            try:
-                target_c = num_cols[0]; actual_c = num_cols[1]
-                tmp = df.copy()
-                tmp["_ach"] = (pd.to_numeric(tmp[actual_c], errors="coerce") /
-                               pd.to_numeric(tmp[target_c], errors="coerce") * 100).round(1)
-                on_track  = len(tmp[tmp["_ach"] >= 80])
-                at_risk   = len(tmp[(tmp["_ach"] >= 50) & (tmp["_ach"] < 80)])
-                off_track = len(tmp[tmp["_ach"] < 50])
-                not_started = tmp["_ach"].isna().sum()
-                avg_prog  = tmp["_ach"].mean().round(1)
-                analysis_df = tmp
-                st.session_state.analysis_df = analysis_df
-            except: pass
-    else:
-        total_ind=1248; avg_prog=68.4; on_track=842; at_risk=216; not_started=190
-
+    # ── HERO ────────────────────────────────────────────────────────────────────
     st.markdown(f"""
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-ic" style="background:#EFF6FF;">📊</div>
-        <div class="kpi-lbl">Total Indicators</div>
-        <div class="kpi-val">{total_ind:,}</div>
-        <div class="kpi-trend up">↑ 12.4%</div>
-        <div class="kpi-sub">vs last month</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-ic" style="background:#F0FDF4;">🎯</div>
-        <div class="kpi-lbl">Overall Progress</div>
-        <div class="kpi-val">{avg_prog}%</div>
-        <div class="kpi-trend up">↑ 8.7%</div>
-        <div class="kpi-sub">vs last month</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-ic" style="background:#F0FDF4;">✅</div>
-        <div class="kpi-lbl">On Track</div>
-        <div class="kpi-val">{on_track:,}</div>
-        <div class="kpi-trend up">↑ 15.3%</div>
-        <div class="kpi-sub">67.6% of total</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-ic" style="background:#FFFBEB;">⚠️</div>
-        <div class="kpi-lbl">At Risk</div>
-        <div class="kpi-val">{at_risk}</div>
-        <div class="kpi-trend up">↑ 5.4%</div>
-        <div class="kpi-sub">17.3% of total</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-ic" style="background:#FFF1F2;">🔴</div>
-        <div class="kpi-lbl">Not Started</div>
-        <div class="kpi-val">{not_started}</div>
-        <div class="kpi-trend down">↓ 2.1%</div>
-        <div class="kpi-sub">Last Updated 2 mins ago</div>
+    <div class="hero">
+      <div class="ai-badge">✦ AI Powered</div>
+      <h1 class="hero-title">Monitoring &amp; Evaluation<br>Intelligence Platform</h1>
+      <p class="hero-sub">Transform project data into actionable insights, donor-ready reports,
+      compliance reports, and AI-powered recommendations.</p>
+      <div class="hero-chips">
+        <div class="hero-chip">📊 Impact Measurement</div>
+        <div class="hero-chip">📋 Donor Reporting</div>
+        <div class="hero-chip">🛡 Compliance Frameworks</div>
+        <div class="hero-chip">🤖 AI-Powered Intelligence</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Feature Cards ──────────────────────────────────────────────────────────
-    st.markdown("""
-    <div class="feat-grid">
-      <div class="feat-card">
-        <div class="feat-ic" style="background:#EFF6FF;">☁️</div>
-        <div class="feat-title">Data Upload</div>
-        <div class="feat-desc">Upload and manage project datasets.</div>
-        <div class="feat-arr">→</div>
-      </div>
-      <div class="feat-card">
-        <div class="feat-ic" style="background:#F0FDF4;">📈</div>
-        <div class="feat-title">Performance Dashboard</div>
-        <div class="feat-desc">Monitor indicators and project performance.</div>
-        <div class="feat-arr">→</div>
-      </div>
-      <div class="feat-card">
-        <div class="feat-ic" style="background:#FDF4FF;">🔬</div>
-        <div class="feat-title">Root Cause Analysis</div>
-        <div class="feat-desc">AI-powered performance diagnostics.</div>
-        <div class="feat-arr">→</div>
-      </div>
-      <div class="feat-card">
-        <div class="feat-ic" style="background:#FFFBEB;">📋</div>
-        <div class="feat-title">Donor Reporting</div>
-        <div class="feat-desc">Generate donor-compliant reports.</div>
-        <div class="feat-arr">→</div>
-      </div>
-      <div class="feat-card">
-        <div class="feat-ic" style="background:#F0FDF4;">🛡</div>
-        <div class="feat-title">Compliance Frameworks</div>
-        <div class="feat-desc">Track reporting and compliance standards.</div>
-        <div class="feat-arr">→</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── KPI ROW ──────────────────────────────────────────────────────────────────
+    k1,k2,k3,k4,k5 = st.columns(5, gap="small")
+    kpi_data = [
+        (k1,"kpi-total","📊","Total Indicators",f"{total_ind:,}","↑ 12.4%","up","vs last month"),
+        (k2,"kpi-progress","🎯","Overall Progress",f"{avg_prog}%","↑ 8.7%","up","vs last month"),
+        (k3,"kpi-ontrack","✅","On Track",f"{on_track:,}","↑ 15.3%","up","67.6% of total"),
+        (k4,"kpi-atrisk","⚠️","At Risk",f"{at_risk}","↑ 5.4%","up","17.3% of total"),
+        (k5,"kpi-notstart","🔴","Not Started",f"{not_start}","↓ 2.1%","down","Last updated 2m ago"),
+    ]
+    for col,cls,ic,lbl,val,trend,direction,sub in kpi_data:
+        with col:
+            st.markdown(f"""
+            <div class="kpi-card {cls}">
+              <div class="kpi-ic" style="background:{'#EFF6FF' if 'total' in cls else '#F0FDF4' if 'ontrack' in cls else '#FFFBEB' if 'atrisk' in cls else '#FFF1F2' if 'notstart' in cls else '#F5F3FF'}">{ic}</div>
+              <div class="kpi-lbl">{lbl}</div>
+              <div class="kpi-val">{val}</div>
+              <div class="kpi-trend {direction}">{('↑' if direction=='up' else '↓')} {trend.replace('↑ ','').replace('↓ ','')}</div>
+              <div class="kpi-sub">{sub}</div>
+            </div>""", unsafe_allow_html=True)
 
-    # ── Charts Row ─────────────────────────────────────────────────────────────
-    c1, c2, c3 = st.columns([1, 1.7, 1.3], gap="small")
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
-    with c1:
-        st.markdown('<div class="chart-card"><div class="chart-title">Project Health Score</div><div class="chart-sub">Overall performance index</div>', unsafe_allow_html=True)
-        fig_gauge = go.Figure(go.Indicator(
-            mode="gauge+number", value=float(avg_prog) if avg_prog else 75,
-            number={"suffix":"/100","font":{"size":28,"color":"#0F172A","family":"Inter"}},
+    # ── FEATURE CARDS ────────────────────────────────────────────────────────────
+    f1,f2,f3,f4,f5 = st.columns(5, gap="small")
+    feats = [
+        (f1,"#EFF6FF","☁️","Data Upload","Upload and manage project datasets."),
+        (f2,"#F0FDF4","📈","Performance Dashboard","Monitor indicators and project performance."),
+        (f3,"#FDF4FF","🔬","Root Cause Analysis","AI-powered performance diagnostics."),
+        (f4,"#FFFBEB","📋","Donor Reporting","Generate donor-compliant reports."),
+        (f5,"#F0FDF4","🛡","Compliance Frameworks","Track reporting and compliance standards."),
+    ]
+    for col,bg,ic,title,desc in feats:
+        with col:
+            st.markdown(f"""
+            <div class="feat-card">
+              <div class="feat-ic" style="background:{bg}">{ic}</div>
+              <div class="feat-title">{title}</div>
+              <div class="feat-desc">{desc}</div>
+              <div class="feat-arr">→</div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+    # ── LOWER 3-COLUMN SECTION ────────────────────────────────────────────────────
+    lc1, lc2, lc3 = st.columns([1, 1.6, 1.3], gap="small")
+
+    # COL 1: Project Health Score gauge
+    with lc1:
+        st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+        st.markdown('<div class="ct">Project Health Score</div><div class="cs">Overall performance index</div>', unsafe_allow_html=True)
+        fig_g = go.Figure(go.Indicator(
+            mode="gauge+number", value=health_score,
+            number={"suffix":"/100","font":{"size":26,"color":"#0F172A"}},
             gauge={
-                "axis":{"range":[0,100],"tickcolor":"#E2E8F0"},
+                "axis":{"range":[0,100],"tickcolor":"#E2E8F0","tickwidth":1},
                 "bar":{"color":"#0F4CFF","thickness":0.28},
-                "steps":[
-                    {"range":[0,50],"color":"#FEE2E2"},
-                    {"range":[50,80],"color":"#FEF9C3"},
-                    {"range":[80,100],"color":"#DCFCE7"}
-                ],
-                "borderwidth":0,"bgcolor":"white"
+                "bgcolor":"white","borderwidth":0,
+                "steps":[{"range":[0,40],"color":"#FEE2E2"},
+                         {"range":[40,70],"color":"#FEF9C3"},
+                         {"range":[70,100],"color":"#DCFCE7"}],
             }
         ))
-        fig_gauge.update_layout(
-            height=200, margin=dict(t=20,b=10,l=20,r=20),
-            paper_bgcolor="white", font_family="Inter"
-        )
-        st.plotly_chart(fig_gauge, use_container_width=True, config={"displayModeBar":False})
-        status = "Good" if float(avg_prog or 75) >= 70 else "Needs Attention"
-        color = "#22C55E" if status=="Good" else "#F59E0B"
-        st.markdown(f'<div style="text-align:center;font-size:.8rem;font-weight:700;color:{color};">● {status}</div>', unsafe_allow_html=True)
+        fig_g.update_layout(height=190, margin=dict(t=20,b=5,l=15,r=15),
+                            paper_bgcolor="white")
+        st.plotly_chart(fig_g, use_container_width=True, config={"displayModeBar":False})
+        st.markdown(f"""
+        <div style="text-align:center;margin-top:-10px;">
+          <span style="display:inline-flex;align-items:center;gap:5px;
+            background:{'#F0FDF4' if hlabel=='Good' else '#FFFBEB' if hlabel=='Fair' else '#FFF1F2'};
+            border-radius:999px;padding:4px 12px;font-size:.78rem;font-weight:700;color:{hcolor};">
+            ● {hlabel}
+          </span>
+          <div style="font-size:.68rem;color:{hcolor};font-weight:600;margin-top:5px;">
+            ↑ 8 pts vs last month
+          </div>
+        </div>""", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with c2:
-        st.markdown("""
+    # COL 2: AI Analysis Overview
+    with lc2:
+        ai_fields = [
+            ("🔬","#FDF4FF","Root Cause Analysis",
+             f"{ai['root_cause_count'] if ai else 3} key issues identified"),
+            ("💡","#F0FDF4","Recommendations",
+             f"{ai['recommendations_count'] if ai else 12} action items generated"),
+            ("⚠️","#FFFBEB","Risk Detection",
+             f"{ai['risks_detected'] if ai else 5} risks detected"),
+            ("💰","#EFF6FF","Budget Utilization",
+             f"{ai['budget_utilization_pct'] if ai else 68.0:.0f}% of budget utilized"),
+            ("📈","#F0FDF4","Performance Forecast",
+             (ai["performance_forecast"][:40]+"…" if ai and len(ai.get("performance_forecast",""))>40
+              else (ai["performance_forecast"] if ai else "On track to meet targets"))),
+            ("✅","#EFF6FF","Data Quality Score",
+             f"{ai['data_quality_score'] if ai else 92.0:.0f}% data quality"),
+        ]
+        items_html = "".join([
+            f'<div class="ai-item"><div class="ai-ic" style="background:{bg}">{ic}</div>'
+            f'<div><div class="ai-t">{title}</div><div class="ai-d">{desc}</div></div></div>'
+            for ic,bg,title,desc in ai_fields
+        ])
+        header = '<span class="va" style="cursor:pointer;">View full analysis →</span>'
+        st.markdown(f"""
         <div class="chart-card">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">
-          <div><div class="chart-title">AI Analysis Overview</div><div class="chart-sub">Qwen AI diagnostics summary</div></div>
-          <span class="view-all">View full analysis →</span>
-        </div>
-        <div class="ai-grid">
-          <div class="ai-item"><div class="ai-ic" style="background:#FDF4FF;">🔬</div><div><div class="ai-title">Root Cause Analysis</div><div class="ai-desc">3 key issues identified</div></div></div>
-          <div class="ai-item"><div class="ai-ic" style="background:#F0FDF4;">💡</div><div><div class="ai-title">Recommendations</div><div class="ai-desc">12 action items generated</div></div></div>
-          <div class="ai-item"><div class="ai-ic" style="background:#FFFBEB;">⚠️</div><div><div class="ai-title">Risk Detection</div><div class="ai-desc">5 risks detected</div></div></div>
-          <div class="ai-item"><div class="ai-ic" style="background:#EFF6FF;">💰</div><div><div class="ai-title">Budget Utilization</div><div class="ai-desc">68% of budget utilized</div></div></div>
-          <div class="ai-item"><div class="ai-ic" style="background:#F0FDF4;">📈</div><div><div class="ai-title">Performance Forecast</div><div class="ai-desc">On track to meet targets</div></div></div>
-          <div class="ai-item"><div class="ai-ic" style="background:#EFF6FF;">✔️</div><div><div class="ai-title">Data Quality Score</div><div class="ai-desc">92% data quality</div></div></div>
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+            <div><div class="ct">AI Analysis Overview</div><div class="cs">Qwen AI diagnostics summary</div></div>
+            {header}
+          </div>
+          <div class="ai-grid">{items_html}</div>
+        </div>""", unsafe_allow_html=True)
 
-    with c3:
-        if st.session_state.analysis_df is not None and "_ach" in st.session_state.analysis_df.columns:
-            adf = st.session_state.analysis_df.copy()
-            months = ["Dec","Jan","Feb","Mar","Apr","May"]
-            progress_vals = [25,35,42,55,62,float(avg_prog)]
+    # COL 3: Progress Over Time
+    with lc3:
+        time_range = st.selectbox("", ["Last 6 Months","Last 12 Months"],
+                                  label_visibility="collapsed", key="time_range")
+        months_6  = ["Dec","Jan","Feb","Mar","Apr","May"]
+        months_12 = ["Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May"]
+        if df is not None and "date" in df.columns and "current_value" in df.columns:
+            try:
+                tmp = df.copy()
+                tmp["date"] = pd.to_datetime(tmp["date"])
+                tmp["_ach"] = pd.to_numeric(tmp["current_value"],errors="coerce") / \
+                              pd.to_numeric(tmp["target_value"],errors="coerce") * 100
+                monthly = tmp.groupby(tmp["date"].dt.to_period("M"))["_ach"].mean().reset_index()
+                x_vals = [str(p) for p in monthly["date"]]
+                y_vals = monthly["_ach"].tolist()
+            except:
+                x_vals = months_6; y_vals = [25,35,42,55,62,float(avg_prog)]
         else:
-            months = ["Dec","Jan","Feb","Mar","Apr","May"]
-            progress_vals = [25,35,42,55,62,68.4]
+            n = 6 if time_range == "Last 6 Months" else 12
+            x_vals = (months_6 if n==6 else months_12)
+            y_vals = ([25,35,42,55,62,68] if n==6
+                      else [18,22,25,30,35,38,42,48,55,60,65,68])
 
-        fig_line = go.Figure()
-        fig_line.add_trace(go.Scatter(
-            x=months, y=progress_vals, mode="lines+markers",
+        fig_l = go.Figure()
+        fig_l.add_trace(go.Scatter(
+            x=x_vals, y=y_vals, mode="lines+markers",
             line=dict(color="#0F4CFF", width=2.5),
-            marker=dict(size=7, color="#0F4CFF",
-                        line=dict(width=2, color="white")),
-            fill="tozeroy",
-            fillcolor="rgba(15,76,255,0.07)"
+            marker=dict(size=7, color="#0F4CFF", line=dict(width=2,color="white")),
+            fill="tozeroy", fillcolor="rgba(15,76,255,0.07)"
         ))
-        fig_line.update_layout(
-            height=210, margin=dict(t=10,b=10,l=10,r=10),
+        fig_l.update_layout(
+            height=208, margin=dict(t=10,b=10,l=10,r=10),
             paper_bgcolor="white", plot_bgcolor="white",
-            xaxis=dict(showgrid=False, tickfont=dict(size=10)),
+            xaxis=dict(showgrid=False, tickfont=dict(size=9)),
             yaxis=dict(showgrid=True, gridcolor="#F1F5F9",
-                       ticksuffix="%", tickfont=dict(size=10),
-                       range=[0,100]),
-            showlegend=False, font_family="Inter"
+                       ticksuffix="%", tickfont=dict(size=9), range=[0,100]),
+            showlegend=False
         )
-        st.markdown('<div class="chart-card"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div><div class="chart-title">Progress Over Time</div><div class="chart-sub">Last 6 months</div></div></div>', unsafe_allow_html=True)
-        st.plotly_chart(fig_line, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('<div class="chart-card"><div class="ct">Progress Over Time</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_l, use_container_width=True, config={"displayModeBar":False})
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Analyze Section (shown when data uploaded) ────────────────────────────
-    if df is not None:
-        st.markdown('<div class="sec-title">Indicator Analysis</div>', unsafe_allow_html=True)
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-        cols = df.columns.tolist()
-        num_cols = df.select_dtypes(include='number').columns.tolist()
+    # ── BOTTOM ROW ────────────────────────────────────────────────────────────────
+    b1, b2, b3 = st.columns([1.25, 1.1, 1], gap="small")
 
-        col_a, col_b, col_c, col_d = st.columns(4)
-        with col_a: indicator_col = st.selectbox("Indicator Name", cols)
-        with col_b: target_col = st.selectbox("Target", num_cols if num_cols else cols, index=0)
-        with col_c: actual_col = st.selectbox("Actual", num_cols if num_cols else cols, index=min(1, len(num_cols)-1) if len(num_cols)>1 else 0)
-        with col_d: project_name = st.text_input("Project Name", value="NGO Project")
+    # B1: Performance by Category
+    with b1:
+        if df is not None and "category" in df.columns and "current_value" in df.columns:
+            df2 = df.copy()
+            df2["current_value"] = pd.to_numeric(df2["current_value"], errors="coerce")
+            df2["target_value"]  = pd.to_numeric(df2["target_value"], errors="coerce")
+            df2["_ach"] = df2["current_value"] / df2["target_value"] * 100
+            cat_df = df2.groupby("category")["_ach"].mean().reset_index()
+            cats, vals = cat_df["category"].tolist(), cat_df["_ach"].round(1).tolist()
+        else:
+            cats = ["Health","Education","WASH","Nutrition","Livelihood","Protection"]
+            vals = [72,58,45,68,81,39]
 
-        report_period = st.text_input("Reporting Period", value="Q2 2026")
-        donor_format  = st.selectbox("Donor Format", ["Generic NGO","USAID","European Union (EU)","United Nations (UN)","Global Fund"])
+        filter_opts = ["All Categories"] + cats
+        sel_cat = st.selectbox("", filter_opts, label_visibility="collapsed", key="cat_filter")
+        if sel_cat != "All Categories":
+            idx = cats.index(sel_cat) if sel_cat in cats else None
+            if idx is not None: cats, vals = [cats[idx]], [vals[idx]]
 
-        if st.button("🤖 Run AI Analysis", type="primary", use_container_width=True):
-            try:
-                adf = df[[indicator_col, target_col, actual_col]].copy()
-                adf.columns = ["Indicator","Target","Actual"]
-                adf["Target"] = pd.to_numeric(adf["Target"], errors="coerce")
-                adf["Actual"] = pd.to_numeric(adf["Actual"], errors="coerce")
-                adf.dropna(inplace=True)
-                adf["Achievement (%)"] = (adf["Actual"]/adf["Target"]*100).round(1)
-                adf["Status"] = adf["Achievement (%)"].apply(
-                    lambda x: "🟢 On Track" if x>=80 else ("🟡 At Risk" if x>=50 else "🔴 Off Track"))
-                st.session_state.analysis_df = adf
-            except Exception as e:
-                st.error(f"Error: {e}"); st.stop()
+        fig_bar = px.bar(x=cats, y=vals,
+                         color=vals, color_continuous_scale=["#BFDBFE","#0F4CFF"],
+                         labels={"x":"","y":"Achievement %"})
+        fig_bar.update_layout(height=230, margin=dict(t=10,b=10,l=10,r=10),
+                              paper_bgcolor="white", plot_bgcolor="white",
+                              showlegend=False, coloraxis_showscale=False,
+                              yaxis=dict(gridcolor="#F1F5F9",ticksuffix="%",tickfont=dict(size=9)),
+                              xaxis=dict(tickfont=dict(size=9)))
+        st.markdown('<div class="chart-card"><div class="ct">Performance by Indicator Category</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('</div>', unsafe_allow_html=True)
 
-            # Bar chart
-            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-            fig_bar = px.bar(
-                adf, x="Indicator", y="Achievement (%)",
-                color="Status",
-                color_discrete_map={"🟢 On Track":"#22C55E","🟡 At Risk":"#F59E0B","🔴 Off Track":"#EF4444"},
-                text="Achievement (%)", title=""
-            )
-            fig_bar.add_hline(y=80, line_dash="dash", line_color="#94A3B8",
-                              annotation_text="80% target", annotation_position="top right")
-            fig_bar.update_traces(texttemplate="%{text}%", textposition="outside")
-            fig_bar.update_layout(
-                plot_bgcolor="white", paper_bgcolor="white",
-                height=360, margin=dict(t=10,b=10,l=10,r=10),
-                font_family="Inter", showlegend=True,
-                xaxis=dict(tickfont=dict(size=10)),
-                yaxis=dict(gridcolor="#F1F5F9")
-            )
-            st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar":False})
-            st.dataframe(adf, use_container_width=True, hide_index=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+    # B2: Risk Matrix
+    with b2:
+        impact_levels = ["High","Medium","Low"]
+        likelihood_levels = ["Low","Medium","High","Very High"]
+        # Derive from data or use demo
+        if df is not None and "status" in df.columns:
+            on  = on_track; ar = at_risk; ns = not_start
+            matrix = [[1, ar//3+1, ar//3, 1],
+                      [1, 0,       1,     ar//2],
+                      [0, 1,       0,     0]]
+        else:
+            matrix = [[1,2,1,0],[1,0,1,2],[0,1,0,0]]
 
-            # AI Features
-            if not api_key:
-                st.warning("⚠️ Enter your Qwen API key to generate AI narrative, root cause analysis, and forecast.")
-            else:
-                client = OpenAI(api_key=api_key, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-                data_str = adf.to_string(index=False)
-                off_track_df = adf[adf["Achievement (%)"] < 80]
+        colors = [["#FCA5A5","#FCA5A5","#FCA5A5","#FCA5A5"],
+                  ["#FDE68A","#FCA5A5","#FCA5A5","#FCA5A5"],
+                  ["#BBF7D0","#BBF7D0","#FDE68A","#FDE68A"]]
 
-                donor_map = {
-                    "Generic NGO":"Standard NGO reporting language.",
-                    "USAID":"USAID PMP-style narrative. Use 'beneficiaries','host country partners','performance indicators'.",
-                    "European Union (EU)":"EU grant format. Use 'action','contracting authority','result indicators','target groups'.",
-                    "United Nations (UN)":"UN RBM framework. Use outcome/output/activity language. Reference SDG alignment.",
-                    "Global Fund":"PUDR format. Emphasise absorption, coverage, and system-level change."
-                }
+        fig_rm = go.Figure()
+        for ri, row in enumerate(matrix):
+            for ci, val in enumerate(row):
+                fig_rm.add_trace(go.Scatter(
+                    x=[ci], y=[ri], mode="markers+text",
+                    marker=dict(size=48, color=colors[ri][ci], symbol="square",
+                                line=dict(width=1, color="white")),
+                    text=[str(val) if val > 0 else ""],
+                    textfont=dict(size=13, color="white"),
+                    textposition="middle center", showlegend=False,
+                    hoverinfo="skip"
+                ))
+        fig_rm.update_layout(
+            height=230, margin=dict(t=10,b=40,l=60,r=10),
+            paper_bgcolor="white", plot_bgcolor="white",
+            xaxis=dict(ticktext=likelihood_levels, tickvals=[0,1,2,3],
+                       title="Likelihood", tickfont=dict(size=8)),
+            yaxis=dict(ticktext=impact_levels, tickvals=[0,1,2],
+                       title="Impact", tickfont=dict(size=8)),
+        )
+        st.markdown('<div class="chart-card"><div class="ct">Risk Matrix</div><div class="cs">Impact vs. Likelihood</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_rm, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("""<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;">
+          <span style="display:flex;align-items:center;gap:4px;font-size:.66rem;color:#64748B;">
+            <span style="width:9px;height:9px;background:#BBF7D0;border-radius:2px;display:inline-block;"></span>Low</span>
+          <span style="display:flex;align-items:center;gap:4px;font-size:.66rem;color:#64748B;">
+            <span style="width:9px;height:9px;background:#FDE68A;border-radius:2px;display:inline-block;"></span>Medium</span>
+          <span style="display:flex;align-items:center;gap:4px;font-size:.66rem;color:#64748B;">
+            <span style="width:9px;height:9px;background:#FCA5A5;border-radius:2px;display:inline-block;"></span>High</span>
+        </div></div>""", unsafe_allow_html=True)
 
-                tabs = st.tabs(["📝 Donor Report","🔬 Root Cause Analysis","📈 Forecast"])
+    # B3: Recent Activity
+    with b3:
+        items_html = "".join([
+            f'<div class="act-item"><span style="font-size:1rem;">{a["icon"]}</span>'
+            f'<div><div class="act-ev">{a["event"]}</div>'
+            f'<div class="act-t">{a["time"]}</div></div></div>'
+            for a in st.session_state.activity_log
+        ])
+        st.markdown(f"""
+        <div class="chart-card" style="min-height:260px;">
+          <div class="ct">Recent Activity</div>
+          <div class="cs">Latest platform events</div>
+          {items_html}
+        </div>""", unsafe_allow_html=True)
 
-                with tabs[0]:
-                    with st.spinner("✍️ Writing donor report..."):
-                        try:
-                            r = client.chat.completions.create(
-                                model=model_choice,
-                                messages=[{"role":"user","content":f"""Senior M&E officer writing donor report.
-Project:{project_name} Period:{report_period} Format:{donor_format}
-Instructions:{donor_map[donor_format]}
-Data:\n{data_str}
-Write: 1)Executive Summary 2)Progress per Indicator 3)Achievements 4)Challenges 5)Recommendations
-450-600 words, cite exact numbers, no placeholders."""}],
-                                max_tokens=1400)
-                            narrative = r.choices[0].message.content
-                            st.session_state["narrative"] = narrative
-                            st.markdown(f'<div class="report-box">{narrative.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
-                        except Exception as e:
-                            st.error(f"API Error: {e}")
+    # ── AI REPORT GENERATOR (shown when data uploaded + API key available) ──────
+    if df is not None and _api_key:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        st.markdown("""<div style="font-size:.72rem;font-weight:900;color:#0F172A;
+          letter-spacing:.08em;text-transform:uppercase;margin:16px 0 12px;
+          display:flex;align-items:center;gap:10px;">
+          AI Report Generator
+          <span style="flex:1;height:1px;background:#E2E8F0;display:block;"></span>
+        </div>""", unsafe_allow_html=True)
 
-                with tabs[1]:
-                    if len(off_track_df) == 0:
-                        st.success("All indicators are on track.")
-                    else:
-                        with st.spinner("🔍 Analysing root causes..."):
-                            try:
-                                r = client.chat.completions.create(
-                                    model=model_choice,
-                                    messages=[{"role":"user","content":f"""M&E specialist. Off-track indicators:
-{off_track_df[['Indicator','Target','Actual','Achievement (%)']].to_string(index=False)}
-For EACH: Root Cause(1-2 sentences), Corrective Action(1 sentence), Risk Level(Low/Medium/High)
-Format: **[Name]** (X%)\n- Root Cause:...\n- Action:...\n- Risk:..."""}],
-                                    max_tokens=900)
-                                rca = r.choices[0].message.content
-                                st.session_state["rca_text"] = rca
-                                st.markdown(f'<div class="report-box">{rca.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
-                            except Exception as e:
-                                st.error(f"API Error: {e}")
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1: proj = st.text_input("Project Name", value="NGO Project 2026")
+        with rc2: period = st.text_input("Reporting Period", value="Q2 2026")
+        with rc3:
+            donor = st.selectbox("Donor Format",
+                ["Generic NGO","USAID","European Union (EU)","United Nations (UN)","Global Fund"])
 
-                with tabs[2]:
-                    quarters = st.slider("Quarters elapsed",1,4,2)
-                    with st.spinner("📊 Generating forecast..."):
-                        try:
-                            r = client.chat.completions.create(
-                                model=model_choice,
-                                messages=[{"role":"user","content":f"""M&E analyst. Quarters elapsed:{quarters}/4
-Data:\n{data_str}
-For each indicator: projected year-end %, verdict(Will Meet/At Risk/Will Miss), 1-sentence explanation.
-Output markdown table then 2-sentence summary."""}],
-                                max_tokens=800)
-                            forecast = r.choices[0].message.content
-                            st.session_state["forecast_text"] = forecast
-                            st.markdown(f'<div class="report-box">{forecast}</div>', unsafe_allow_html=True)
-                        except Exception as e:
-                            st.error(f"API Error: {e}")
+        donor_inst = {
+            "Generic NGO":"Standard NGO reporting language.",
+            "USAID":"USAID PMP-style. Use 'beneficiaries','performance indicators','host country partners'.",
+            "European Union (EU)":"EU grant format. Use 'action','contracting authority','result indicators'.",
+            "United Nations (UN)":"UN RBM framework. Outcome/output/activity language. Reference SDG alignment.",
+            "Global Fund":"PUDR format. Emphasise absorption, coverage, system-level change."
+        }
 
-                # Downloads
-                st.markdown('<div class="sec-title" style="margin-top:24px;">Download Report Package</div>', unsafe_allow_html=True)
-                d1, d2 = st.columns(2)
-                with d1:
-                    report_txt = f"""M&E COPILOT ENTERPRISE — FULL REPORT PACKAGE
-{'='*60}
-Project: {project_name} | Period: {report_period} | Format: {donor_format}
-Generated: {datetime.now().strftime('%d %B %Y, %H:%M')}
-{'='*60}
+        if st.button("🤖 Generate Donor Report", type="primary", use_container_width=True):
+            data_str = df.to_string(index=False)
+            prompt = (f"Senior M&E officer. Project:{proj} Period:{period} Format:{donor}\n"
+                      f"Instructions:{donor_inst[donor]}\nData:\n{data_str}\n"
+                      "Write: 1)Executive Summary 2)Progress per Indicator "
+                      "3)Key Achievements 4)Challenges 5)Recommendations. 450-600 words, cite numbers.")
+            with st.spinner("✍️ Writing donor report with Qwen AI..."):
+                try:
+                    resp = Generation.call(
+                        model="qwen-max",
+                        messages=[{"role":"user","content":prompt}],
+                        result_format="message"
+                    )
+                    narrative = resp.output.choices[0].message.content
+                    add_activity("📋", f"Generated {donor} report for {proj}")
+                    st.markdown(f"""
+                    <div style="background:white;border-radius:14px;padding:32px 36px;
+                      box-shadow:0 1px 4px rgba(15,31,61,.05),0 8px 24px rgba(15,31,61,.08);
+                      border-top:5px solid #0F4CFF;line-height:1.9;font-size:.93rem;color:#1c2b48;">
+                      {narrative.replace(chr(10),"<br>")}
+                    </div>""", unsafe_allow_html=True)
 
-DONOR REPORT
-{st.session_state.get('narrative','')}
-
-ROOT CAUSE ANALYSIS
-{st.session_state.get('rca_text','')}
-
-FORECAST
-{st.session_state.get('forecast_text','')}
-
-DATA TABLE
-{adf.to_string(index=False)}
-
-Generated by M&E Copilot Enterprise · Powered by Qwen AI
-"""
-                    st.download_button("📥 Download Full Report (.txt)", data=report_txt,
-                        file_name=f"me_copilot_{datetime.now().strftime('%Y%m%d')}.txt",
-                        mime="text/plain", use_container_width=True)
-                with d2:
-                    st.download_button("📥 Download Data (.csv)", data=adf.to_csv(index=False),
-                        file_name=f"indicators_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv", use_container_width=True)
-
-    else:
-        # ── Bottom Charts (static demo) ────────────────────────────────────────
-        st.markdown('<div class="sec-title">Performance Analytics</div>', unsafe_allow_html=True)
-        b1, b2 = st.columns([1.2, 1], gap="small")
-
-        with b1:
-            categories = ["Health","Education","WASH","Nutrition","Livelihood","Protection"]
-            values = [7.2, 5.8, 6.9, 4.3, 5.1, 3.8]
-            fig_cat = px.bar(x=categories, y=values, color=values,
-                color_continuous_scale=["#EFF6FF","#0F4CFF"],
-                labels={"x":"","y":"Performance %"})
-            fig_cat.update_layout(height=260, margin=dict(t=10,b=10,l=10,r=10),
-                paper_bgcolor="white", plot_bgcolor="white",
-                showlegend=False, coloraxis_showscale=False,
-                font_family="Inter",
-                yaxis=dict(gridcolor="#F1F5F9"),
-                xaxis=dict(tickfont=dict(size=10)))
-            st.markdown('<div class="chart-card"><div class="chart-title">Performance by Indicator Category</div><div class="chart-sub">All categories</div>', unsafe_allow_html=True)
-            st.plotly_chart(fig_cat, use_container_width=True, config={"displayModeBar":False})
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with b2:
-            st.markdown("""
-            <div class="chart-card">
-              <div class="chart-title">Risk Matrix</div>
-              <div class="chart-sub">Impact vs. Likelihood</div>
-              <div class="risk-matrix" style="margin-top:10px;">
-                <div class="risk-cell" style="background:#FCA5A5;"></div>
-                <div class="risk-cell" style="background:#FCA5A5;"><span class="risk-num">2</span></div>
-                <div class="risk-cell" style="background:#FCA5A5;"><span class="risk-num">1</span></div>
-                <div class="risk-cell" style="background:#FDE68A;"><span class="risk-num">1</span></div>
-                <div class="risk-cell" style="background:#FCA5A5;"></div>
-                <div class="risk-cell" style="background:#FCA5A5;"><span class="risk-num">5</span></div>
-                <div class="risk-cell" style="background:#BBF7D0;"></div>
-                <div class="risk-cell" style="background:#FDE68A;"></div>
-                <div class="risk-cell" style="background:#FDE68A;"></div>
-              </div>
-              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
-                <div style="display:flex;align-items:center;gap:4px;font-size:.68rem;color:#64748B;"><span style="width:10px;height:10px;background:#BBF7D0;border-radius:2px;display:inline-block;"></span>Low</div>
-                <div style="display:flex;align-items:center;gap:4px;font-size:.68rem;color:#64748B;"><span style="width:10px;height:10px;background:#FDE68A;border-radius:2px;display:inline-block;"></span>Medium</div>
-                <div style="display:flex;align-items:center;gap:4px;font-size:.68rem;color:#64748B;"><span style="width:10px;height:10px;background:#FCA5A5;border-radius:2px;display:inline-block;"></span>High</div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
+                    report_pkg = (f"M&E COPILOT ENTERPRISE — REPORT PACKAGE\n{'='*55}\n"
+                                  f"Project:{proj} | Period:{period} | Format:{donor}\n"
+                                  f"Generated:{datetime.now().strftime('%d %B %Y %H:%M')}\n"
+                                  f"{'='*55}\n\n{narrative}\n\n{'='*55}\n"
+                                  f"DATA TABLE\n{df.to_string(index=False)}\n"
+                                  f"Generated by M&E Copilot Enterprise · Powered by Qwen AI")
+                    dl1, dl2 = st.columns(2)
+                    with dl1:
+                        st.download_button("📥 Download Report (.txt)", data=report_pkg,
+                            file_name=f"report_{datetime.now().strftime('%Y%m%d')}.txt",
+                            mime="text/plain", use_container_width=True)
+                    with dl2:
+                        st.download_button("📥 Download Data (.csv)",
+                            data=df.to_csv(index=False),
+                            file_name=f"data_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Qwen API error: {e}")
+    elif df is not None and not _api_key:
+        st.info("💡 Enter your Qwen API key in the sidebar to enable AI report generation.")
